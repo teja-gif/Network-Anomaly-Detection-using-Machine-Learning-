@@ -1,1 +1,13 @@
+# render.yaml
 
+services:
+  - type: web
+    name: network-security-dashboard
+    env: python
+    plan: free # Or your preferred instance type
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT app:app"
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.9 # Specify a Python version you've tested with
