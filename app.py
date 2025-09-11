@@ -166,42 +166,44 @@ def calculate_and_emit_metrics():
             for key, ts in list(icmp_requests.items()):
                 if time.time() - ts > 5: del icmp_requests[key]
 
-# <-- IP BLOCKING: This is the updated WAF worker function -->
+# <-- MODIFIED: This WAF worker is now safe for cloud deployment -->
 def waf_worker():
-    """Pulls packets from the queue, inspects them, and blocks attackers."""
+    """Pulls packets from the queue, inspects them, and logs blocking actions."""
     global blocked_ips
     while True:
         packet = http_packet_queue.get()
         if packet is None: continue
 
         try:
-            payload = packet[Raw].load.decode('utf-8', errors='ignore').lower()
-            for attack_type, pattern in WAF_RULES.items():
-                if pattern.search(payload):
-                    attacker_ip = packet[IP].src
-                    
-                    if attacker_ip not in blocked_ips:
-                        print(f"🚨 WAF ALERT: {attack_type} detected from {attacker_ip}. Blocking IP address.")
+            # This logic assumes the traffic is HTTP. For HTTPS, you would need a different approach.
+            if packet.haslayer(Raw):
+                payload = packet[Raw].load.decode('utf-8', errors='ignore').lower()
+                for attack_type, pattern in WAF_RULES.items():
+                    if pattern.search(payload):
+                        attacker_ip = packet[IP].src
                         
-                        # --- Choose your OS and uncomment the correct line below ---
-                        # For Windows (run as Administrator)
-                        os.system(f'netsh advfirewall firewall add rule name="WAF Block {attacker_ip}" dir=in action=block remoteip={attacker_ip}')
+                        if attacker_ip not in blocked_ips:
+                            # In a containerized environment like Render, you cannot modify the host's firewall.
+                            # Instead of calling os.system, we log the action and add the IP to an in-memory set.
+                            print(f"🚨 WAF ALERT: {attack_type} detected from {attacker_ip}. Logging and adding to internal block list.")
+                            
+                            # os.system(f'netsh advfirewall firewall add rule name="WAF Block {attacker_ip}" dir=in action=block remoteip={attacker_ip}') # This will fail
+                            # os.system(f"iptables -A INPUT -s {attacker_ip} -j DROP") # This will also fail
+                            
+                            blocked_ips.add(attacker_ip)
                         
-                        # For Linux (run with sudo)
-                        # os.system(f"iptables -A INPUT -s {attacker_ip} -j DROP")
-                        
-                        blocked_ips.add(attacker_ip)
-                    
-                    alert_data = {
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'src_ip': attacker_ip,
-                        'dst_ip': packet[IP].dst,
-                        'attack_type': attack_type,
-                        'payload': payload[:100] + '...' if len(payload) > 100 else payload
-                    }
-                    socketio.emit('web_attack_alert', alert_data)
-                    break 
-        except Exception:
+                        alert_data = {
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'src_ip': attacker_ip,
+                            'dst_ip': packet[IP].dst,
+                            'attack_type': attack_type,
+                            'payload': payload[:100] + '...' if len(payload) > 100 else payload
+                        }
+                        socketio.emit('web_attack_alert', alert_data)
+                        break 
+        except Exception as e:
+            # It's good practice to log the specific exception
+            print(f"[WAF-WORKER-ERROR] An error occurred: {e}")
             pass
 
 def process_packet(packet):
@@ -217,6 +219,7 @@ def process_packet(packet):
             if packet[ICMP].type == 3: error_packets_sec += 1
         if packet.haslayer(TCP) and 'R' in packet[TCP].flags: error_packets_sec += 1
 
+    # The WAF worker will only process HTTP traffic on port 80.
     if packet.haslayer(TCP) and packet.haslayer(Raw) and packet[TCP].dport == 80:
         http_packet_queue.put(packet)
 
@@ -245,16 +248,22 @@ def process_packet(packet):
 @app.route('/')
 def index():
     try:
+        # Ensure index.html is in the same directory as app.py
         with open('index.html', 'r') as f: return render_template_string(f.read())
     except FileNotFoundError:
         return "Error: index.html not found.", 404
 
 def packet_sniffer_thread():
+    # --- CRITICAL DEPLOYMENT NOTE ---
+    # The sniff() function requires root privileges to capture network packets,
+    # which are not available in standard cloud deployment containers like Render.
+    # This thread will likely fail to start and the core NIDS functionality
+    # will not work in a deployed environment. This code is for local testing only.
     try:
         sniff(prn=process_packet, store=False)
     except PermissionError:
-        print("\n[!] PermissionError: Please run with root/administrator privileges.")
-        os._exit(1)
+        print("\n[!] PermissionError: Cannot sniff packets without root/administrator privileges.")
+        print("[!] This is expected on platforms like Render. The NIDS part of the app will not function.")
     except Exception as e:
         print(f"\n[!] An error occurred during sniffing: {e}")
 
@@ -262,12 +271,20 @@ if __name__ == "__main__":
     if model:
         print("Starting real-time network anomaly detection server...")
         
+        # Start the background threads
         threading.Thread(target=check_for_timeouts, daemon=True).start()
         threading.Thread(target=calculate_and_emit_metrics, daemon=True).start()
+        
+        # Start the packet sniffer. Note the limitation mentioned above.
         threading.Thread(target=packet_sniffer_thread, daemon=True).start()
+        
+        # Start the WAF worker
         threading.Thread(target=waf_worker, daemon=True).start()
 
-        print("Dashboard available at http://127.0.0.1:5000")
-        socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+        # <-- MODIFIED: Use environment variable for port, default to 5000 -->
+        port = int(os.environ.get('PORT', 5000))
+        print(f"Dashboard available at http://0.0.0.0:{port}")
+        # The host must be '0.0.0.0' to be accessible in a container
+        socketio.run(app, host='0.0.0.0', port=port, debug=False)
     else:
         print("[!] Script halted because the model could not be loaded.")
