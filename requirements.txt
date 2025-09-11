@@ -7,5 +7,6 @@ joblib
 numpy
 pandas 
 tensorflow
-
+scikit-learn
 psutil 
+
