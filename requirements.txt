@@ -1,12 +1,12 @@
+# requirements.txt
+
 Flask
 Flask-SocketIO
-Flask-Cors
-eventlet
-scapy
 joblib
 numpy
-pandas 
+pandas
 tensorflow
-scikit-learn
-psutil 
+scapy
+gunicorn 
+# gunicorn is a production-grade server, better than Flask's default
 
